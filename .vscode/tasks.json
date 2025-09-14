@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "a09: build (hex + lst)",
+      "type": "shell",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "a09 -x ${fileBasenameNoExtension}.hex -l ${fileBasenameNoExtension}.lst ${file} && echo ✔ HEX + LST generated successfully!"
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "a09: build (bin)",
+      "type": "shell",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "a09 -o ${fileBasenameNoExtension}.bin ${file} && echo ✔ BIN file created successfully!"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "a09: all (hex + lst + bin)",
+      "dependsOn": [
+        "a09: build (hex + lst)",
+        "a09: build (bin)"
+      ],
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
