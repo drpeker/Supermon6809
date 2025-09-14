@@ -1,23 +1,44 @@
 V10 Help routine improved with dynamic subroutine adresses
+
 V9     Fill command added Fill 2000 3000 ff
+
 V8     COPY command added. this command copes a memory block 
+
         to other location.
-V7    
+        
+V7  
+
        Stabile version
+       
        "SAVE" command added
+       
 v6;
        Command parser improved
+       
        Command table addded
+       
        minor improvement
+       
        single Char command input (fallback read) removed.
+       
        all commands must be added command table and parser chain!
+       
 supermon-modular-5.asm;
+
     -Stabile version
+    
     -Parser Kernel Separated
+    
     -flexible command input: r,run,dump,d...
+    
     -flexible addr input: DUMP 0 120 or D 250 1FFF
+    
     -many small bugs fixed
+    
     -ready to add small interpreters
+    
     -this is final version of Supermon's first stage
+    
  SuperMon-6809 — FINAL (Parser Kernel + Exec Routines)
+ 
  Goal: Keep behavior/visuals identical; refactor into KERNEL (parse) + EXEC (run)
