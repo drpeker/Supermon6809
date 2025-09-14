@@ -42,3 +42,4 @@ supermon-modular-5.asm;
  SuperMon-6809 — FINAL (Parser Kernel + Exec Routines)
  
  Goal: Keep behavior/visuals identical; refactor into KERNEL (parse) + EXEC (run)
+ ![Screenshot](supermon6809.jpg)
