@@ -1,0 +1,1549 @@
+0000:                 ;V10 Help routine improved with dynamic subroutine adresses
+0000:                 ;V9     Fill command added Fill 2000 3000 ff
+0000:                 ;V8     COPY command added. this command copes a memory block 
+0000:                 ;        to other location.
+0000:                 ;V7    
+0000:                 ;       Stabile version
+0000:                 ;       "SAVE" command added
+0000:                 ;v6;
+0000:                 ;       Command parser improved
+0000:                 ;       Command table addded
+0000:                 ;       minor improvements
+0000:                 ;supermon-modular-5.asm;
+0000:                 ;    -Stabile version
+0000:                 ;    -Parser Kernel Separated
+0000:                 ;    -flexible command input: r,run,dump,d...
+0000:                 ;    -flexible addr input: DUMP 0 120 or D 250 1FFF
+0000:                 ;    -many small bugs fixed
+0000:                 ;    -ready to add small interpreters
+0000:                 ;    -this is final version of Supermon's first stage
+0000:                 ; SuperMon-6809 — FINAL (Parser Kernel + Exec Routines)
+0000:                 ; Goal: Keep behavior/visuals identical; refactor into KERNEL (parse) + EXEC (run)
+0000:                 ; Extra: addresses parsed "as-is" (1..4 hex nibbles, left-padded to 16-bit).
+0000:                 ; Rules: No '.' and '' in labels or variables.
+0000:                 
+0000:                                
+0000:                 
+0000:                 ; ===================== Direct Page Variables =====================
+0000:                 addrhi          equ   $40        ; active address HI
+0000:                 addrlo          equ   $41        ; active address LO
+0000:                 RECLEN          equ   $42        ; loader length
+0000:                 TMP             equ   $44        ; temp
+0000:                 HEXLDREG        equ   $45        ; generic counter
+0000:                 PTR             equ   $46        ; DP pointer MSB
+0000:                 PTRL            equ   $47        ; DP pointer LSB (PTR+1)
+0000:                 
+0000:                 LOADSTA         equ   $52        ; generic 16-bit (used as END for dump)
+0000:                 LOADSTAL        equ   $53
+0000:                 
+0000:                 TMPH            equ   $57        ; temp hi
+0000:                 TMPL            equ   $58        ; temp lo
+0000:                 
+0000:                 ; --- Parser/Command kernel DP ---
+0000:                 INLEN           equ   $60        ; line length
+0000:                 INPOS           equ   $61        ; parse cursor (0..INLEN)
+0000:                 TOK             equ   $62        ; temp char
+0000:                 
+0000:                 CMDID           equ   $64        ; command id (R=1,D=2,M=3,L=4,H=5)
+0000:                 ARGW0HI         equ   $65        ; first 16-bit argument (e.g., start addr)
+0000:                 ARGW0LO         equ   $66
+0000:                 ARGW1HI         equ   $67        ; second 16-bit argument (e.g., end addr)
+0000:                 ARGW1LO         equ   $68
+0000:                 ARGCNT          equ   $69        ; used as nibble counter in READADDR
+0000:                 ADLEN0          equ   $6A       ; 1. adresin nibble sayısı (1..4)
+0000:                 ADLEN1          equ   $6B       ; 2. adresin nibble sayısı (1..4)
+0000:                 
+0000:                 SAVECHKS       equ   $6C       ; kayit checksum toplami (low byte tutulacak)
+0000:                 SAVECNT        equ   $6D       ; satir icin kalem uzunlugu sayaci (0..16)
+0000:                 
+0000:                 ARGW2HI        equ   $6E       ; ucuncu 16-bit arguman (len)
+0000:                 ARGW2LO        equ   $6F
+0000:                 ; --- Line buffer ---
+0000:                 INBUF           equ   $80        ; 128-byte input line buffer ($80..$FF)
+0000:                 
+0000:                 ; ===================== ACIA 6850 =====================
+0000:                 aciactl         equ   $A000
+0000:                 aciasta         equ   $A000
+0000:                 aciadat         equ   $A001
+0000:                 
+0000:                 ; ===================== Reset / Greet =====================
+0000:                 
+0000:                 ramstart    equ    $1FFF
+0000:                 ldustart    equ     $1BFF
+0000:                 
+0000:                 ; ========== Giriş Noktası ==========
+0000:                 ; -------------------------------
+0000:                 ; SYSTEM INIT: Stack'ları kurar
+0000:                 ; -------------------------------
+0000:                                 ORG     $C000
+C000:                 
+C000:                 ;INITSYSTEM:
+C000:                 reset:     
+C000: 10CE1FFF                    lds  #ramstart    ; Stack init
+C004: CE1BFF                      ldU  #ldustart     
+C007: 1A10                        SEI                 ; (opsiyonel) disable interrupts
+C009: 4F                          CLRA
+C00A: 1F8B                        TFR   A,DP          ; DP = $00  --> direct page 00 sayfası            
+C00C: BDC115                      jsr initacia
+C00F:                 
+C00F:                 GREET:
+C00F: 8EC144                  ldx  #GMSG              ; greeting
+C012: BDC109                  jsr  PRINT              ; print
+C015: 7ECB2D                  jmp  MON                ; go monitor
+C018:                 
+C018:                 ; ===================== Bootloader (UNCHANGED behavior) =====================
+C018:                 LOADERZ:
+C018: 8EC26A                  ldx  #LMSG              ; loader msg
+C01B: BDC109                  jsr  PRINT              ; print
+C01E: 7EC040                  jmp  INTLIN1            ; to loader
+C021:                 
+C021:                 LOADED:
+C021: 8EC29B                  ldx  #DONEMSG           ; "Start Address: $"
+C024: BDC109                  jsr  PRINT
+C027: 9652                    lda  LOADSTA            ; start HI
+C029: BDC0DF                  jsr  HEXOUT
+C02C: 9653                    lda  LOADSTAL           ; start LO
+C02E: BDC0DF                  jsr  HEXOUT
+C031: 860D                    lda  #$0D               ; CR
+C033: BDC135                  jsr  OUTCH
+C036: 860A                    lda  #$0A               ; LF
+C038: BDC135                  jsr  OUTCH
+C03B: 9E52                    ldx  LOADSTA            ; X=start
+C03D: 160AED                  lbra MON                ; back to monitor
+C040:                 
+C040:                 INTLIN1:
+C040: 4F                      clra
+C041: 9745                    sta  HEXLDREG
+C043:                 INTLIN:
+C043: BDC120                  jsr  GETCH
+C046: 813A                    cmpa #':'
+C048: 26F9                    bne  INTLIN
+C04A: BDC089                  jsr  BYTERD             ; len
+C04D: 9742                    sta  RECLEN
+C04F: BDC089                  jsr  BYTERD             ; addr HI
+C052: 9740                    sta  addrhi
+C054: BDC089                  jsr  BYTERD             ; addr LO
+C057: 9741                    sta  addrlo
+C059: 9E40                    ldx  addrhi
+C05B: 9645                    lda  HEXLDREG
+C05D: 8101                    cmpa #$01
+C05F: 2706                    beq  GOON
+C061: 8601                    lda  #$01
+C063: 9745                    sta  HEXLDREG
+C065: 9F52                    stx  LOADSTA
+C067: BDC089          GOON:   jsr  BYTERD             ; rectype
+C06A: 8101                    cmpa #$01               ; EOF?
+C06C: 270F                    beq  GETGARBAGE
+C06E: BDC089          DATAIN: jsr  BYTERD
+C071: A784                    sta  ,x
+C073: 3001                    leax 1,x
+C075: 0A42                    dec  RECLEN
+C077: 9642                    lda  RECLEN
+C079: 26F3                    bne  DATAIN
+C07B: 20C6                    bra  INTLIN
+C07D:                 GETGARBAGE:
+C07D: BDC120                  jsr  GETCH             ;must be replaced non polling read ch!!
+C080: BDC120                  jsr  GETCH
+C083: BDC120                  jsr  GETCH
+C086: 7EC021                  jmp  LOADED
+C089:                 
+C089:                 BYTERD:                         ; read 2 hex chars -> byte (A)
+C089: 0F57                    clr  TMPH
+C08B: BDC120          BYTH:   jsr  GETCH
+C08E: BDC0B0                  jsr  HEXCON
+C091: 25F8                    bcs  BYTH
+C093: 48                      asla
+C094: 48                      asla
+C095: 48                      asla
+C096: 48                      asla
+C097: 84F0                    anda #$F0
+C099: 9757                    sta  TMPH
+C09B: 0F58                    clr  TMPL
+C09D: BDC120          BYTL:   jsr  GETCH
+C0A0: BDC0B0                  jsr  HEXCON
+C0A3: 25F8                    bcs  BYTL
+C0A5: 840F                    anda #$0F
+C0A7: 9758                    sta  TMPL
+C0A9: 9658                    lda  TMPL
+C0AB: 9A57                    ora  TMPH
+C0AD: 9744                    sta  TMP
+C0AF: 39                      rts
+C0B0:                 
+C0B0:                 HEXCON:                         ; ASCII '0'..'9','A'..'F','a'..'f' -> nibble in A, C=0 ok, C=1 err
+C0B0: 8130                    cmpa #'0'
+C0B2: 2527                    blo  HEXBAD
+C0B4: 8139                    cmpa #'9'
+C0B6: 2205                    bhi  HEXALPHA
+C0B8: 8030                    suba #'0'
+C0BA: 1CFE                    clc
+C0BC: 39                      rts
+C0BD:                 HEXALPHA:
+C0BD: 8141                    cmpa #'A'
+C0BF: 250B                    blo  HEXLOW
+C0C1: 8146                    cmpa #'F'
+C0C3: 2207                    bhi  HEXLOW
+C0C5: 8041                    suba #'A'
+C0C7: 8B0A                    adda #10
+C0C9: 1CFE                    clc
+C0CB: 39                      rts
+C0CC:                 HEXLOW:
+C0CC: 8161                    cmpa #'a'
+C0CE: 250B                    blo  HEXBAD
+C0D0: 8166                    cmpa #'f'
+C0D2: 2207                    bhi  HEXBAD
+C0D4: 8061                    suba #'a'
+C0D6: 8B0A                    adda #10
+C0D8: 1CFE                    clc
+C0DA: 39                      rts
+C0DB: 4F              HEXBAD: clra
+C0DC: 1A01                    sec
+C0DE: 39                      rts
+C0DF:                 
+C0DF:                 HEXOUT:                         ; print A as two hex chars
+C0DF: 3416                    pshs x,b,a
+C0E1: 1F89                    tfr  a,b
+C0E3: 84F0                    anda #$F0
+C0E5: 44                      lsra
+C0E6: 44                      lsra
+C0E7: 44                      lsra
+C0E8: 44                      lsra
+C0E9: 9757                    sta  TMPH
+C0EB: BDC0FA                  jsr  HEXAS
+C0EE: 1F98                    tfr  b,a
+C0F0: 840F                    anda #$0F
+C0F2: 9758                    sta  TMPL
+C0F4: BDC0FA                  jsr  HEXAS
+C0F7: 3516                    puls a,b,x
+C0F9: 39                      rts
+C0FA:                 
+C0FA:                 HEXAS:
+C0FA: 3412                    pshs x,a
+C0FC: 8EC2AE                  ldx  #TABLEX
+C0FF: 3086                    leax a,x
+C101: A684                    lda  ,x
+C103: BDC135                  jsr  OUTCH
+C106: 3512                    puls a,x
+C108: 39                      rts
+C109:                 
+C109:                 PRINT:                          ; print 0-terminated string at X
+C109: A684                    lda  ,x
+C10B: 2707                    beq  PEND
+C10D: BDC135                  jsr  OUTCH
+C110: 3001                    leax 1,x
+C112: 20F5                    bra  PRINT
+C114: 39              PEND:   rts
+C115:                 
+C115:                 initacia:
+C115: 8603                    lda  #$03               ; master reset
+C117: B7A000                  sta  aciactl
+C11A: 8615                    lda  #%00010101         ; 8N1, /16
+C11C: B7A000                  sta  aciactl
+C11F: 39                      rts
+C120:                 
+C120:                 GETCH:                          ; read char, force A..Z
+C120: B6A000                  lda  aciasta
+C123: 8501                    bita #$01
+C125: 27F9                    beq  GETCH
+C127: B6A001                  lda  aciadat
+C12A: 8161                    cmpa #'a'
+C12C: 2506                    blo  gsup
+C12E: 817A                    cmpa #'z'
+C130: 2202                    bhi  gsup
+C132: 84DF                    anda #$DF               ; to upper
+C134: 39              gsup:   rts
+C135:                 
+C135:                 OUTCH:                          ; write char in A
+C135: 3402                    pshs a
+C137: B6A000          po1:    lda  aciasta
+C13A: 8502                    bita #$02
+C13C: 27F9                    beq  po1
+C13E: 3502                    puls a
+C140: B7A001                  sta  aciadat
+C143: 39                      rts
+C144:                 
+C144:                 ; ===================== Messages =====================
+C144: 0C07            GMSG:   fcb $0c,$07
+C146: 53757065724D6F          fcc "SuperMon 6809 By Dr. Peker 2025"
+C165: 0A0D                    fcb $0a,$0d
+C167: 56657273696F6E          fcc "Version: modular-10, @ $C000"
+C183: 0A0D0A0D0A0D            fcb $0a,$0d,$0a,$0d,$0a,$0d
+C189:                         
+C189: 204C4F41442020          fcc " LOAD  - intel Hex loader"
+C1A2: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C1A6: 20534156452020          fcc " SAVE  - intel Hex Save"
+C1BD: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C1C1: 2044554D502020          fcc " DUMP  - dump memory content"
+C1DD: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C1E1: 204D454D202020          fcc " MEM   - Memory  edit"
+C1F6: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C1FA: 20434F50592020          fcc " COPY  - Block copy in memory"
+C217: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C21B: 2046494C4C2020          fcc " FILL  - Fill in memory"
+C232: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C236: 2052554E202020          fcc " RUN   - Run a program"
+C24C: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C250:                         
+C250: 2048454C502020          fcc " HELP  - Help"
+C25D: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C261: 52656164792E            fcc "Ready."
+C267: 0A0D00                  fcb $0a,$0d,$00
+C26A:                 
+C26A: 0A0D            LMSG:   fcb $0a,$0d
+C26C: 53656E64206948          fcc "Send iHex file from your terminal!"
+C28E: 0A0D                    fcb $0a,$0d
+C290: 4C6F6164696E67          fcc "Loading..."
+C29A: 00                      fcb $00
+C29B:                 
+C29B: 0A0D            DONEMSG:fcb $0a,$0d
+C29D: 53746172742041          fcc "Start Address: $"
+C2AD: 00                      fcb $00
+C2AE:                 
+C2AE: 30313233343536  TABLEX: fcc "0123456789ABCDEF"
+C2BE:                 
+C2BE: 0C              HLPMSG: fcb $0c
+C2BF: 2020204C4F4144          fcc "   LOAD   :Starts intel Hex loader"
+C2E1: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C2E5: 20202053415645          fcc "   SAVE addr addr lenght:    intel Hex save"
+C310: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C314: 20202044554D50          fcc "   DUMP addr addr : dumps between two adresses "
+C343: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C347: 2020204D454D20          fcc "   MEM addr aa bb cc dd... <CR> "
+C367: 0A0D                    fcb $0a,$0d
+C369: 20202020202020          fcc "       edits specified memory address-es"
+C391: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C395: 202020434F5059          fcc "   COPY source dest lenght"
+C3AF: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C3B3: 20202046494C4C          fcc "   FILL addr addr val"
+C3C8: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C3CC: 20202052554E20          fcc "   RUN addr : Runs program at given address"
+C3F7: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C3FB:                          
+C3FB: 4E6F74653A2069          fcc "Note: in monitor every address area can be used  "
+C42C: 0A0D                    fcb $0a,$0d
+C42E: 20202020202061          fcc "      as A AA AAA or AAAA"
+C447: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C44B:                        
+C44B: 20202055736566          fcc "   Useful Subroutines (call with jsr EXCEPT prompt):"
+C47F: 0A0D0A0D                fcb $0a,$0d,$0a,$0d
+C483: 00                      fcb $00
+C484:                 
+C484:                 ;Help shows Useful routine adresses Compile adress independently;
+C484:                 GETCHMSG:        
+C484: 20202020204745          fcc "     GETCH  : $"   
+C493: 00                      fcb $00
+C494:                 OUTCHMSG:        
+C494: 20202020204F55          fcc "     OUTCH  : $"
+C4A3: 00                      fcb $00
+C4A4:                 PRINTXMSG:        
+C4A4: 20202020205052          fcc "     PRINT X: $"   
+C4B3: 00                      fcb $00
+C4B4:                 PRINTAMSG:        
+C4B4: 20202020205052          fcc "     PRINT A: $"
+C4C3: 00                      fcb $00
+C4C4:                 DELAYMSG:        
+C4C4: 20202020204445          fcc "     DELAY  : $" 
+C4D3: 00                      fcb $00
+C4D4:                 SPACEMSG:   
+C4D4: 202020202020            fcc "      "
+C4DA: 00                      fcb $00
+C4DB:                 PROMPTMSG:   
+C4DB: 20202020205052          fcc "     PROMT  : $"
+C4EA: 00                      fcb $00 
+C4EB:                 HEXOUTMSG:   
+C4EB: 20202020204845          fcc "     HEXOUT : $"
+C4FA: 00                      fcb $00                 
+C4FB:                 
+C4FB:                 
+C4FB:                 
+C4FB: 533A3E          PMON:   fcc "S:>"
+C4FE: 00                      fcb $00
+C4FF:                 
+C4FF: 3F              PHELP:  fcc "?"
+C500: 00                      fcb $00
+C501:                 ;-------------------Command Keywords----------------------
+C501:                 
+C501:                 ; --- Command keywords (full words only) ---
+C501: 44554D50        KWDUMP:   fcc "DUMP"   
+C505: 00                          fcb $0
+C506: 4D454D4F5259    KWMEMORY: fcc "MEMORY" 
+C50C: 00                          fcb $0
+C50D: 4D454D          KWMEM:    fcc "MEM"    
+C510: 00                          fcb $0
+C511: 4C4F4144        KWLOAD:   fcc "LOAD"   
+C515: 00                          fcb $0
+C516: 48454C50        KWHELP:   fcc "HELP"   
+C51A: 00                          fcb $0
+C51B: 52554E          KWRUN:    fcc "RUN"    
+C51E: 00                          fcb $0
+C51F:                 
+C51F: 53415645        KWSAVE:   fcc "SAVE"   
+C523: 00                          fcb $0
+C524: 434F5059        KWCOPY:   fcc "COPY"   
+C528: 00                          fcb $0                        
+C529: 46494C4C        KWFILL:   fcc "FILL"   
+C52D: 00                          fcb $0  
+C52E:                 
+C52E:                 ;--------------------Command Keywords ended---------------
+C52E:                 ; ===================== Small I/O helpers =====================
+C52E:                 CRLF:
+C52E: 860D                    lda  #$0D
+C530: BDC135                  jsr  OUTCH
+C533: 860A                    lda  #$0A
+C535: BDC135                  jsr  OUTCH
+C538: 39                      rts
+C539:                 
+C539:                 PUTSP:
+C539: 8620                    lda  #' '
+C53B: BDC135                  jsr  OUTCH
+C53E: 39                      rts
+C53F:                 
+C53F:                 ; ===================== Line Buffer (unchanged) =====================
+C53F:                 READLINE:                       ; read into INBUF with BS/DEL, echo
+C53F: 0F60                    clr  INLEN
+C541:                 RLLOOP:
+C541: BDC120                  jsr  GETCH
+C544: 810D                    cmpa #$0D
+C546: 273E                    beq  RLDONE
+C548: 8108                    cmpa #$08
+C54A: 271C                    beq  RLBS
+C54C: 817F                    cmpa #$7F
+C54E: 2718                    beq  RLBS
+C550: 8120                    cmpa #' '
+C552: 25ED                    blo  RLLOOP
+C554: D660                    ldb  INLEN
+C556: C17F                    cmpb #127
+C558: 2425                    bhs  RLBELL
+C55A: 8E0080                  ldx  #INBUF
+C55D: 3085                    leax b,x
+C55F: A784                    sta  ,x
+C561: BDC135                  jsr  OUTCH
+C564: 0C60                    inc  INLEN
+C566: 20D9                    bra  RLLOOP
+C568:                 RLBS:
+C568: D660                    ldb  INLEN
+C56A: 27D5                    beq  RLLOOP
+C56C: 0A60                    dec  INLEN
+C56E: 8608                    lda  #$08
+C570: BDC135                  jsr  OUTCH
+C573: 8620                    lda  #' '
+C575: BDC135                  jsr  OUTCH
+C578: 8608                    lda  #$08
+C57A: BDC135                  jsr  OUTCH
+C57D: 20C2                    bra  RLLOOP
+C57F:                 RLBELL:
+C57F: 8607                    lda  #$07
+C581: BDC135                  jsr  OUTCH
+C584: 20BB                    bra  RLLOOP
+C586:                 RLDONE:
+C586: BDC52E                  jsr  CRLF
+C589: D660                    ldb  INLEN
+C58B: 8E0080                  ldx  #INBUF
+C58E: 3085                    leax b,x
+C590: 6F84                    clr  ,x
+C592: 39                      rts
+C593:                 ;----------------MATCH COMMAND WORD------------------------------
+C593:                 
+C593:                 
+C593:                 SINIT:                          ; parser init
+C593: 0F61                    clr  INPOS
+C595: 39                      rts
+C596:                 
+C596:                 SPEEK:                          ; A= current char or 0
+C596: D661                    ldb  INPOS
+C598: D160                    cmpb INLEN
+C59A: 2408                    bhs  SPEEKEND
+C59C: 8E0080                  ldx  #INBUF
+C59F: 3085                    leax b,x
+C5A1: A684                    lda  ,x
+C5A3: 39                      rts
+C5A4:                 SPEEKEND:
+C5A4: 4F                      clra
+C5A5: 39                      rts
+C5A6:                 
+C5A6:                 SADV:                           ; advance cursor
+C5A6: D661                    ldb  INPOS
+C5A8: D160                    cmpb INLEN
+C5AA: 2402                    bhs  SADVRET
+C5AC: 0C61                    inc  INPOS
+C5AE:                 SADVRET:
+C5AE: 39                      rts
+C5AF:                 
+C5AF:                 SKIPSP:                         ; skip space/comma/$
+C5AF: BDC596          SSKIP:  jsr  SPEEK
+C5B2: 2712                    beq  SSKIPEND
+C5B4: 8120                    cmpa #' '
+C5B6: 2709                    beq  SEAT
+C5B8: 812C                    cmpa #','
+C5BA: 2705                    beq  SEAT
+C5BC: 8124                    cmpa #'$'
+C5BE: 2701                    beq  SEAT
+C5C0: 39                      rts
+C5C1: BDC5A6          SEAT:   jsr  SADV
+C5C4: 20E9                    bra  SSKIP
+C5C6:                 SSKIPEND:
+C5C6: 39                      rts
+C5C7:                 
+C5C7:                 ; MATCHWORD: INPOS'tan itibaren Y=pattern("TXT",0) ile TAM eslesmeyi dener.
+C5C7:                 ; Tam eslesirse: C=0, INPOS kelimenin sonrasina tasinir.
+C5C7:                 ; Degilse: C=1 ve INPOS degismez.
+C5C7:                 MATCHWORD:
+C5C7: 3436                    pshs  d,x,y
+C5C9: D661                    ldb   INPOS
+C5CB: 8E0080                  ldx   #INBUF
+C5CE: 3085                    leax  b,x              ; X = INBUF + INPOS
+C5D0:                         ; COMPARE PATTERN BY LINE
+C5D0:                         ; pattern'i satirla karsilastir
+C5D0:                 MWLOOP:
+C5D0: A6A4                    lda   ,y               ; pattern bayti
+C5D2: 270A                    beq   MWENDPAT         ; 0 -> bitti
+C5D4: A184                    cmpa  ,x
+C5D6: 2626                    bne   MWFAIL
+C5D8: 3001                    leax  1,x
+C5DA: 3121                    leay  1,y
+C5DC: 20F2                    bra   MWLOOP
+C5DE:                 
+C5DE:                 MWENDPAT:                      ; pattern bitti -> sonraki karakter harf mi?
+C5DE: A684                    lda   ,x               ; sonraki karakter
+C5E0: 8141                    cmpa  #'A'
+C5E2: 2506                    blo   MWOK             ; harf degil → TAM
+C5E4: 815A                    cmpa  #'Z'
+C5E6: 2202                    bhi   MWOK             ; harf degil → TAM
+C5E8: 2014                    bra   MWFAIL           ; harfse kismi eslesme = basarisiz
+C5EA:                 
+C5EA:                 MWOK:
+C5EA:                         ; INPOS = X - INBUF   (INPOS 1 bayt, sadece dusuk bayti yaz)
+C5EA: 3410                    pshs  x
+C5EC: 8E0080                  ldx   #INBUF
+C5EF: 9F44                    stx   TMP              ; TMP = INBUF (MSB onemsiz)
+C5F1: 3510                    puls  x                ; X = eslesen kelimenin SONRASI
+C5F3: 1F10                    tfr   x,d              ; D = X
+C5F5: 9344                    subd  TMP              ; D = X - INBUF
+C5F7: D761                    stb   INPOS            ; yalnizca dusuk bayti sakla
+C5F9: 3536                    puls  d,x,y
+C5FB: 1CFE                    clc
+C5FD: 39                      rts
+C5FE:                 
+C5FE:                 MWFAIL:
+C5FE: 3536                    puls  d,x,y
+C600: 1A01                    sec
+C602: 39                      rts
+C603:                 
+C603:                 ; ===================== NEW Parser Kernel =====================
+C603:                 
+C603:                 ; READCMD  -> extracts command id into CMDID (first letter R/D/M/L/H)
+C603:                 ; READADDR -> reads 1..4 hex nibbles as 16-bit, left-padded, echoing hex chars
+C603:                 ; PARSEARGS-> fills ARGW0/ARGW1 depending on CMDID
+C603:                 
+C603:                 ; READCMD: komutu tanır ve komut KELİMESİNİ tüketir (A..Z), INPOS argümanın başında kalır
+C603:                 ; READCMD: Yalnizca TAM komut kelimesi eslesirse kabul eder.
+C603:                 ; Destek: DUMP, MEM, MEMORY, LOAD, HELP, RUN
+C603:                 ; Tek harf YOK (istersen tabloya ayri kelime olarak eklersin).
+C603:                 READCMD:
+C603: BDC5AF                  jsr  SKIPSP             ; ayiraclari atla
+C606: BDC596                  jsr  SPEEK              ; A = ilk karakter
+C609: 4D                      tsta
+C60A: 277E                    beq  RCERR              ; satir bos
+C60C:                 
+C60C:                         ; --- DUMP ---
+C60C: 108EC501                ldy  #KWDUMP
+C610: BDC5C7                  jsr  MATCHWORD
+C613: 2505                    bcs  RCTRYMEMORY
+C615: 8602                    lda  #2                 ; DUMP -> CMDID=2
+C617: 9764                    sta  CMDID
+C619: 39                      rts
+C61A:                 
+C61A:                 RCTRYMEMORY:
+C61A:                         ; --- MEMORY ---
+C61A: 108EC506                ldy  #KWMEMORY
+C61E: BDC5C7                  jsr  MATCHWORD
+C621: 2505                    bcs  RCTRYMEM
+C623: 8603                    lda  #3                 ; MEMORY -> CMDID=3
+C625: 9764                    sta  CMDID
+C627: 39                      rts
+C628:                 
+C628:                 RCTRYMEM:
+C628:                         ; --- MEM ---
+C628: 108EC50D                ldy  #KWMEM
+C62C: BDC5C7                  jsr  MATCHWORD
+C62F: 2505                    bcs  RCTRYLOAD
+C631: 8603                    lda  #3                 ; MEM -> CMDID=3
+C633: 9764                    sta  CMDID
+C635: 39                      rts
+C636:                 
+C636:                 RCTRYLOAD:
+C636:                         ; --- LOAD ---
+C636: 108EC511                ldy  #KWLOAD
+C63A: BDC5C7                  jsr  MATCHWORD
+C63D: 2505                    bcs  RCTRYHELP
+C63F: 8604                    lda  #4                 ; LOAD -> CMDID=4
+C641: 9764                    sta  CMDID
+C643: 39                      rts
+C644:                 
+C644:                 RCTRYHELP:
+C644:                         ; --- HELP ---
+C644: 108EC516                ldy  #KWHELP
+C648: BDC5C7                  jsr  MATCHWORD
+C64B: 2505                    bcs  RCTRYRUN
+C64D: 8605                    lda  #5                 ; HELP -> CMDID=5
+C64F: 9764                    sta  CMDID
+C651: 39                      rts
+C652:                 
+C652:                 RCTRYRUN:
+C652:                         ; --- RUN ---
+C652: 108EC51B                ldy  #KWRUN
+C656: BDC5C7                  jsr  MATCHWORD
+C659: 2505                    bcs  RCTRYSAVE
+C65B: 8601                    lda  #1                 ; RUN -> CMDID=1
+C65D: 9764                    sta  CMDID
+C65F: 39                      rts
+C660:                 
+C660:                 RCTRYSAVE:
+C660: 108EC51F                ldy  #KWSAVE
+C664: BDC5C7                  jsr  MATCHWORD
+C667: 2505                    bcs  RCTRYCOPY
+C669: 8606                    lda  #6
+C66B: 9764                    sta  CMDID
+C66D: 39                      rts
+C66E:                 
+C66E:                 RCTRYCOPY:
+C66E: 108EC524                ldy  #KWCOPY
+C672: BDC5C7                  jsr  MATCHWORD
+C675: 2505                    bcs  RCTRYFILL
+C677: 8607                    lda  #7                ; COPY -> CMDID=7
+C679: 9764                    sta  CMDID
+C67B: 39                      rts       
+C67C:                 
+C67C:                 RCTRYFILL:
+C67C: 108EC529                ldy  #KWFILL
+C680: BDC5C7                  jsr  MATCHWORD
+C683: 2505                    bcs  RCERR
+C685: 8608                    lda  #8                ; FILL -> CMDID=8
+C687: 9764                    sta  CMDID
+C689: 39                      rts      
+C68A:                 
+C68A:                 RCERR:
+C68A: 0F64                    clr  CMDID              ; tanimsiz komut
+C68C: 39                      rts
+C68D:                 
+C68D:                 
+C68D:                 
+C68D:                 ; READADDR: 1..4 hex nibble oku → TMPH:TMPL (16-bit). Hexleri echo eder.
+C68D:                 ; Basari: C=0, TMPH:TMPL hazir, ARGCNT=okunan nibble sayisi (1..4)
+C68D:                 ; Hata  : C=1 (hic nibble okunmadi)
+C68D:                 READADDR:
+C68D: 0F57                    clr  TMPH              ; value = 0
+C68F: 0F58                    clr  TMPL
+C691: 0F69                    clr  ARGCNT            ; nibble sayaci
+C693:                 
+C693:                 RALOOP:
+C693: BDC596                  jsr  SPEEK
+C696: 274B                    beq  RAEOF            ; satir sonu → en az 1 nibble varsa basari
+C698:                 
+C698:                         ; A karakteri hex mi? ('0'..'9','A'..'F')
+C698: 3402                    pshs a                 ; orijinali sakla
+C69A: 8130                    cmpa #'0'
+C69C: 250C                    blo  RADELIM          ; hex degil → ayirac kabul et
+C69E: 8139                    cmpa #'9'
+C6A0: 2311                    bls  RAHEXNUM         ; '0'..'9'
+C6A2:                 
+C6A2: 8141                    cmpa #'A'
+C6A4: 2504                    blo  RADELIM
+C6A6: 8146                    cmpa #'F'
+C6A8: 230D                    bls  RAHEXALP         ; 'A'..'F'
+C6AA:                 
+C6AA:                         ; hex degil → ayirac
+C6AA:                 RADELIM:
+C6AA: 3502                    puls a                 ; orijinali at
+C6AC: 9669                    lda  ARGCNT
+C6AE: 273A                    beq  RADONENONE      ; hic nibble yok → hata
+C6B0: 1CFE                    clc                    ; en az 1 nibble vardi → basari
+C6B2: 39                      rts
+C6B3:                 
+C6B3:                 ; '0'..'9' → nibble = A - '0'
+C6B3:                 RAHEXNUM:
+C6B3: 8030                    suba #'0'              ; A = 0..9
+C6B5: 2004                    bra  RAHAVENIB
+C6B7:                 
+C6B7:                 ; 'A'..'F' → nibble = A - 'A' + 10
+C6B7:                 RAHEXALP:
+C6B7: 8041                    suba #'A'
+C6B9: 8B0A                    adda #10               ; A = 10..15
+C6BB:                 
+C6BB:                 ; A = nibble (0..15) geldi
+C6BB:                 RAHAVENIB:
+C6BB: 9762                    sta  TOK               ; TOK = nibble
+C6BD: 3502                    puls a                 ; orijinal hex karakteri geri al
+C6BF: BDC135                  jsr  OUTCH             ; echo
+C6C2: BDC5A6                  jsr  SADV              ; karakteri tuket
+C6C5: 0C69                    inc  ARGCNT
+C6C7:                 
+C6C7:                         ; value <<= 4  (4 kez: LSL TMPL / ROL TMPH)
+C6C7: C604                    ldb  #4
+C6C9:                 RASHIFT4:
+C6C9: 0858                    lsl  TMPL
+C6CB: 0957                    rol  TMPH
+C6CD: 5A                      decb
+C6CE: 26F9                    bne  RASHIFT4
+C6D0:                 
+C6D0:                         ; value += nibble
+C6D0: 9658                    lda  TMPL
+C6D2: 9B62                    adda TOK
+C6D4: 9758                    sta  TMPL
+C6D6: 2402                    bcc  RANEXT
+C6D8: 0C57                    inc  TMPH
+C6DA:                 
+C6DA:                 RANEXT:
+C6DA: 9669                    lda  ARGCNT
+C6DC: 8104                    cmpa #4
+C6DE: 25B3                    blo  RALOOP           ; 4 nibble’dan azsa devam
+C6E0: 1CFE                    clc                    ; 4 nibble tamamlandi → basari
+C6E2: 39                      rts
+C6E3:                 
+C6E3:                 ; satir sonu geldi
+C6E3:                 RAEOF:
+C6E3: 9669                    lda  ARGCNT
+C6E5: 2703                    beq  RADONENONE      ; hic nibble yok → hata
+C6E7: 1CFE                    clc                    ; en az 1 nibble var → basari
+C6E9: 39                      rts
+C6EA:                 
+C6EA:                 RADONENONE:
+C6EA: 1A01                    sec
+C6EC: 39                      rts
+C6ED:                 ;----------------------READADDR BURADA BİTİYOR---------------------        
+C6ED:                 
+C6ED:                 ; PARSEARGS: Komutun argumanlarini okur ve yerlestirir
+C6ED:                 ; C=1 hata durumunda, C=0 basari
+C6ED:                 
+C6ED:                 PARSEARGS:
+C6ED: 9664                    lda  CMDID              ; komut id
+C6EF: 102700F3                lbeq  PAERR              ; tanimsiz
+C6F3:                 
+C6F3: 8104                    cmpa #4                 ; LOAD: arguman yok
+C6F5: 102700EC                lbeq  PAOK
+C6F9:                 
+C6F9: 8105                    cmpa #5                 ; HELP: arguman yok
+C6FB: 102700E6                lbeq  PAOK
+C6FF:                 
+C6FF: 8101                    cmpa #1                 ; RUN: 1 adres
+C701: 2613                    bne  PANOTR
+C703: BDC5AF                  jsr  SKIPSP             ; ayraclari atla
+C706: BDC68D                  jsr  READADDR           ; TMPH:TMPL = adres
+C709: 102500D9                lbcs  PAERR              ; hic nibble yoksa hata
+C70D: 9657                    lda  TMPH               ; ARGW0 = adres
+C70F: 9765                    sta  ARGW0HI
+C711: 9658                    lda  TMPL
+C713: 9766                    sta  ARGW0LO
+C715: 39                      rts
+C716:                 
+C716: 8102            PANOTR: cmpa #2                 ; DUMP: 2 adres (baslangic, bitis)
+C718: 2625                    bne  PANOTD
+C71A: BDC5AF                  jsr  SKIPSP
+C71D: BDC68D                  jsr  READADDR           ; ilk adres
+C720: 102500C2                lbcs  PAERR
+C724: 9657                    lda  TMPH
+C726: 9765                    sta  ARGW0HI
+C728: 9658                    lda  TMPL
+C72A: 9766                    sta  ARGW0LO
+C72C: BDC5AF                  jsr  SKIPSP
+C72F: BDC68D                  jsr  READADDR           ; ikinci adres
+C732: 102500B0                lbcs  PAERR
+C736: 9657                    lda  TMPH
+C738: 9767                    sta  ARGW1HI
+C73A: 9658                    lda  TMPL
+C73C: 9768                    sta  ARGW1LO
+C73E: 39                      rts
+C73F:                 
+C73F: 8103            PANOTD: cmpa #3                 ; MEM: 1 adres, baytlar exec'te
+C741: 2613                    bne  PANOTSAVE
+C743: BDC5AF                  jsr  SKIPSP
+C746: BDC68D                  jsr  READADDR
+C749: 10250099                lbcs  PAERR
+C74D: 9657                    lda  TMPH
+C74F: 9765                    sta  ARGW0HI
+C751: 9658                    lda  TMPL
+C753: 9766                    sta  ARGW0LO
+C755: 39                      rts
+C756:                 
+C756:                 PANOTSAVE:
+C756: 8106                    cmpa #6                 ; SAVE: 2 adres (baslangic, bitis)
+C758: 2623                    bne  PANOTCOPY
+C75A: BDC5AF                  jsr  SKIPSP
+C75D: BDC68D                  jsr  READADDR           ; ilk adres
+C760: 10250082                lbcs  PAERR
+C764: 9657                    lda  TMPH
+C766: 9765                    sta  ARGW0HI
+C768: 9658                    lda  TMPL
+C76A: 9766                    sta  ARGW0LO
+C76C: BDC5AF                  jsr  SKIPSP
+C76F: BDC68D                  jsr  READADDR           ; ikinci adres
+C772: 2572                    bcs  PAERR
+C774: 9657                    lda  TMPH
+C776: 9767                    sta  ARGW1HI
+C778: 9658                    lda  TMPL
+C77A: 9768                    sta  ARGW1LO
+C77C: 39                      rts
+C77D:                 PANOTCOPY:
+C77D: 8107                    cmpa #7                 ; COPY: 3 adres (src, dst, len)
+C77F: 2631                    bne  PANOTFILL
+C781:                 
+C781: BDC5AF                  jsr  SKIPSP
+C784: BDC68D                  jsr  READADDR           ; ARGW0 = src
+C787: 255D                    bcs  PAERR
+C789: 9657                    lda  TMPH
+C78B: 9765                    sta  ARGW0HI
+C78D: 9658                    lda  TMPL
+C78F: 9766                    sta  ARGW0LO
+C791:                 
+C791: BDC5AF                  jsr  SKIPSP
+C794: BDC68D                  jsr  READADDR           ; ARGW1 = dst
+C797: 254D                    bcs  PAERR
+C799: 9657                    lda  TMPH
+C79B: 9767                    sta  ARGW1HI
+C79D: 9658                    lda  TMPL
+C79F: 9768                    sta  ARGW1LO
+C7A1:                 
+C7A1: BDC5AF                  jsr  SKIPSP
+C7A4: BDC68D                  jsr  READADDR           ; ARGW2 = len
+C7A7: 253D                    bcs  PAERR
+C7A9: 9657                    lda  TMPH
+C7AB: 976E                    sta  ARGW2HI
+C7AD: 9658                    lda  TMPL
+C7AF: 976F                    sta  ARGW2LO
+C7B1: 39                      rts
+C7B2:                 
+C7B2:                 PANOTFILL:
+C7B2: 8108                    cmpa #8                 ; FILL: 3 arguman (start, end, val)
+C7B4: 2630                    bne  PAERR
+C7B6:                 
+C7B6: BDC5AF                  jsr  SKIPSP
+C7B9: BDC68D                  jsr  READADDR           ; ARGW0 = start
+C7BC: 2528                    bcs  PAERR
+C7BE: 9657                    lda  TMPH
+C7C0: 9765                    sta  ARGW0HI
+C7C2: 9658                    lda  TMPL
+C7C4: 9766                    sta  ARGW0LO
+C7C6:                 
+C7C6: BDC5AF                  jsr  SKIPSP
+C7C9: BDC68D                  jsr  READADDR           ; ARGW1 = end
+C7CC: 2518                    bcs  PAERR
+C7CE: 9657                    lda  TMPH
+C7D0: 9767                    sta  ARGW1HI
+C7D2: 9658                    lda  TMPL
+C7D4: 9768                    sta  ARGW1LO
+C7D6:                 
+C7D6: BDC5AF                  jsr  SKIPSP
+C7D9: BDC68D                  jsr  READADDR           ; ARGW2LO = val (1..2 nibble yeterli)
+C7DC: 2508                    bcs  PAERR
+C7DE: 0F6E                    clr  ARGW2HI
+C7E0: 9658                    lda  TMPL
+C7E2: 976F                    sta  ARGW2LO
+C7E4: 39                      rts        
+C7E5:                 
+C7E5: 39              PAOK:   rts                     ; argumansiz komutlar icin
+C7E6: 1A01            PAERR:  sec                     ; hata
+C7E8: 39                      rts
+C7E9:                 
+C7E9:                 ; ===================== Parser helper: read 2 hex as a byte (echoing) =====================
+C7E9:                 ; SREADBYTE: buffer’dan 2 hex nibble oku → A=byte, echo eder
+C7E9:                 ; C=0 ok, C=1 hata/eksik nibble
+C7E9:                 SREADBYTE:
+C7E9: BDC5AF                  jsr  SKIPSP              ; ayraçları atla
+C7EC:                 
+C7EC:                         ; HI nibble
+C7EC: BDC596                  jsr  SPEEK
+C7EF: 273A                    beq  SRBERR
+C7F1: 3402                    pshs a
+C7F3: BDC0B0                  jsr  HEXCON
+C7F6: 2531                    bcs  SRBERRPOP
+C7F8: 3502                    puls a
+C7FA: BDC135                  jsr  OUTCH               ; echo
+C7FD: BDC0B0                  jsr  HEXCON              ; A=hi nibble
+C800: 48                      asla
+C801: 48                      asla
+C802: 48                      asla
+C803: 48                      asla
+C804: 84F0                    anda #$F0
+C806: 9744                    sta  TMP                 ; TMP = hi<<4
+C808: BDC5A6                  jsr  SADV                ; tüket
+C80B:                 
+C80B:                         ; LO nibble
+C80B: BDC596                  jsr  SPEEK
+C80E: 271B                    beq  SRBERR
+C810: 3402                    pshs a
+C812: BDC0B0                  jsr  HEXCON
+C815: 2512                    bcs  SRBERRPOP
+C817: 3502                    puls a
+C819: BDC135                  jsr  OUTCH               ; echo
+C81C: BDC0B0                  jsr  HEXCON              ; A=lo nibble
+C81F: 840F                    anda #$0F
+C821: 9A44                    ora  TMP                 ; A = (hi<<4)|lo
+C823: BDC5A6                  jsr  SADV                ; tüket
+C826: 1CFE                    clc
+C828: 39                      rts
+C829:                 
+C829:                 SRBERRPOP:
+C829: 3502                    puls a                   ; stack’i düzelt
+C82B:                 SRBERR:
+C82B: 1A01                    sec
+C82D: 39                      rts
+C82E:                 
+C82E:                 ; ===================== EXEC Routines (no parsing inside) =====================
+C82E:                 
+C82E:                 ; --- Run: jump to ARGW0 ---
+C82E:                 CMDEXECRUN:
+C82E: 9E65                    ldx  ARGW0HI
+C830: BDC52E                  jsr  CRLF
+C833: 6E84                    jmp  ,x
+C835:                 
+C835:                 ; --- Dump: dump ARGW0..ARGW1 inclusive (proven D logic) ---
+C835:                 CMDEXECDUMP:
+C835:                         ; move args into working vars
+C835: 9665                    lda  ARGW0HI
+C837: 9740                    sta  addrhi
+C839: 9666                    lda  ARGW0LO
+C83B: 9741                    sta  addrlo
+C83D: 9667                    lda  ARGW1HI
+C83F: 9752                    sta  LOADSTA
+C841: 9668                    lda  ARGW1LO
+C843: 9753                    sta  LOADSTAL
+C845: 9E40                    ldx  addrhi
+C847:                         ; start>end? → return without output
+C847: 9640                    lda  addrhi
+C849: 9152                    cmpa LOADSTA
+C84B: 2262                    bhi  DRET
+C84D: 2506                    blo  DSTART
+C84F: 9641                    lda  addrlo
+C851: 9153                    cmpa LOADSTAL
+C853: 225A                    bhi  DRET
+C855: BDC52E          DSTART: jsr  CRLF
+C858:                 
+C858:                 DNEXTLINE:
+C858: 9640                    lda  addrhi
+C85A: BDC0DF                  jsr  HEXOUT
+C85D: 9641                    lda  addrlo
+C85F: BDC0DF                  jsr  HEXOUT
+C862: 863A                    lda  #':'
+C864: BDC135                  jsr  OUTCH
+C867: 8620                    lda  #' '
+C869: BDC135                  jsr  OUTCH
+C86C: 8610                    lda  #16
+C86E: 9745                    sta  HEXLDREG
+C870:                 
+C870:                 DLINELOOP:
+C870: 9640                    lda  addrhi
+C872: 9152                    cmpa LOADSTA
+C874: 2226                    bhi  DFINISHLINE
+C876: 2506                    blo  DPRINT
+C878: 9641                    lda  addrlo
+C87A: 9153                    cmpa LOADSTAL
+C87C: 221E                    bhi  DFINISHLINE
+C87E:                 
+C87E: A684            DPRINT: lda  ,x
+C880: BDC0DF                  jsr  HEXOUT
+C883: 8620                    lda  #' '
+C885: BDC135                  jsr  OUTCH
+C888: 3001                    leax 1,x
+C88A:                         ; addr++
+C88A: 9641                    lda  addrlo
+C88C: 8B01                    adda #1
+C88E: 9741                    sta  addrlo
+C890: 2606                    bne  DCOUNT
+C892: 9640                    lda  addrhi
+C894: 8B01                    adda #1
+C896: 9740                    sta  addrhi
+C898: 0A45            DCOUNT: dec  HEXLDREG
+C89A: 26D4                    bne  DLINELOOP
+C89C:                 
+C89C:                 DFINISHLINE:
+C89C: BDC52E                  jsr  CRLF
+C89F:                         ; end?
+C89F: 9640                    lda  addrhi
+C8A1: 9152                    cmpa LOADSTA
+C8A3: 220A                    bhi  DRET
+C8A5: 25B1                    blo  DNEXTLINE
+C8A7: 9641                    lda  addrlo
+C8A9: 9153                    cmpa LOADSTAL
+C8AB: 2202                    bhi  DRET
+C8AD: 20A9                    bra  DNEXTLINE
+C8AF: 39              DRET:   rts
+C8B0:                 
+C8B0:                 ; --- Memory Edit: write bytes starting at ARGW0 (exec writes) ---
+C8B0:                 CMDEXECMEM:
+C8B0:                         ; working addr = ARGW0
+C8B0: 9665                    lda  ARGW0HI
+C8B2: 9740                    sta  addrhi
+C8B4: 9666                    lda  ARGW0LO
+C8B6: 9741                    sta  addrlo
+C8B8:                 
+C8B8:                         ; Visual: print "aaaa " then bytes as written (space-separated)
+C8B8: BDC52E                  jsr  CRLF
+C8BB: 9640                    lda  addrhi
+C8BD: BDC0DF                  jsr  HEXOUT
+C8C0: 9641                    lda  addrlo
+C8C2: BDC0DF                  jsr  HEXOUT
+C8C5: 8620                    lda  #' '
+C8C7: BDC135                  jsr  OUTCH
+C8CA:                 
+C8CA:                 MLOOPX:
+C8CA: BDC5AF                  jsr  SKIPSP
+C8CD: BDC596                  jsr  SPEEK
+C8D0: 272A                    beq  MDONEX
+C8D2: BDC7E9                  jsr  SREADBYTE
+C8D5: 2525                    bcs  MDONEX
+C8D7:                         ; PTR = addr
+C8D7: 9744                    sta  TMP
+C8D9: 9640                    lda  addrhi
+C8DB: 9746                    sta  PTR
+C8DD: 9641                    lda  addrlo
+C8DF: 9747                    sta  PTRL
+C8E1: 9644                    lda  TMP
+C8E3: A79F0046                sta  [PTR]          ; write A to memory[addr]
+C8E7:                         ; addr++
+C8E7: 9641                    lda  addrlo
+C8E9: 8B01                    adda #1
+C8EB: 9741                    sta  addrlo
+C8ED: 2606                    bne  MECHO
+C8EF: 9640                    lda  addrhi
+C8F1: 8B01                    adda #1
+C8F3: 9740                    sta  addrhi
+C8F5: 8620            MECHO:  lda  #' '
+C8F7: BDC135                  jsr  OUTCH
+C8FA: 20CE                    bra  MLOOPX
+C8FC:                 MDONEX:
+C8FC: BDC52E                  jsr  CRLF
+C8FF: 39                      rts
+C900:                 
+C900:                 ; --- Loader: unchanged ---
+C900:                 CMDEXECLOAD:
+C900: BDC52E                  jsr  CRLF
+C903: 16F712                  lbra LOADERZ
+C906:                 
+C906:                 ; --- Help: unchanged ---
+C906:                 
+C906:                 ;Help shows Useful routine adresses Compile adress independently
+C906:                 CMDEXECHELP:
+C906: 8EC2BE                  ldx  #HLPMSG
+C909: BDC109                  jsr  PRINT
+C90C:                 
+C90C: 8EC484                  LDX #GETCHMSG
+C90F: BDC109                  JSR PRINT
+C912: 8EC120                  LDX #GETCH ; HEXOUT getch label adres (olursa tabi)
+C915: BDCBB9                  JSR PRINTX
+C918:                 
+C918: 8EC4D4                  LDX #SPACEMSG
+C91B: BDC109                  JSR PRINT
+C91E:                 
+C91E: 8EC494                  LDX #OUTCHMSG
+C921: BDC109                  JSR PRINT
+C924: 8EC135                  LDX #OUTCH
+C927: BDCBB9                  JSR PRINTX
+C92A:                 
+C92A: BDC52E                  JSR CRLF        
+C92D:                 
+C92D: 8EC4A4                  LDX #PRINTXMSG
+C930: BDC109                  JSR PRINT
+C933: 8ECBB9                  LDX #PRINTX
+C936: BDCBB9                  JSR PRINTX
+C939:                 
+C939: 8EC4D4                  LDX #SPACEMSG
+C93C: BDC109                  JSR PRINT
+C93F:                 
+C93F: 8EC4B4                  LDX #PRINTAMSG
+C942: BDC109                  JSR PRINT
+C945: 8ECBB5                  LDX #PRINTA
+C948: BDCBB9                  JSR PRINTX                
+C94B:                 
+C94B: BDC52E                  JSR CRLF
+C94E:                 
+C94E: 8EC4C4                  LDX #DELAYMSG
+C951: BDC109                  JSR PRINT
+C954: 8ECBA4                  LDX #DELAY1S
+C957: BDCBB9                  JSR PRINTX
+C95A:                 
+C95A: 8EC4D4                  LDX #SPACEMSG
+C95D: BDC109                  JSR PRINT
+C960:                 
+C960: 8EC4DB                  LDX #PROMPTMSG
+C963: BDC109                  JSR PRINT
+C966: 8ECB2D                  LDX #MON
+C969: BDCBB9                  JSR PRINTX 
+C96C:                 
+C96C: BDC52E                  JSR CRLF
+C96F:                 
+C96F: 8EC4EB                  LDX #HEXOUTMSG
+C972: BDC109                  JSR PRINT
+C975: 8EC0DF                  LDX #HEXOUT
+C978: BDCBB9                  JSR PRINTX        
+C97B:                 
+C97B: 39                      rts
+C97C:                 
+C97C:                 ; CMDEXECSAVE: ARGW0..ARGW1 araligini Intel HEX olarak terminale yazar
+C97C:                 
+C97C:                 CMDEXECSAVE: ; SAVE exec
+C97C: BDC52E                  jsr  CRLF                     ; cikti oncesi satirbasi
+C97F:                 
+C97F:                         ; baslangic ve bitis degerlerini yerlestir
+C97F: 9665                    lda  ARGW0HI                  ; baslangic HI
+C981: 9740                    sta  addrhi
+C983: 9666                    lda  ARGW0LO                  ; baslangic LO
+C985: 9741                    sta  addrlo
+C987: 9667                    lda  ARGW1HI                  ; bitis HI
+C989: 9752                    sta  LOADSTA
+C98B: 9668                    lda  ARGW1LO                  ; bitis LO
+C98D: 9753                    sta  LOADSTAL
+C98F:                 
+C98F:                 SAVENEXTLINE: 
+C98F:                         ; remaining = (END - ADDR) + 1  → TMPH:TMPL
+C98F: 9653                    lda  LOADSTAL                 ; low
+C991: 9041                    suba addrlo
+C993: 9758                    sta  TMPL
+C995: 9652                    lda  LOADSTA                  ; high
+C997: 9240                    sbca addrhi
+C999: 9757                    sta  TMPH
+C99B: 9658                    lda  TMPL
+C99D: 8B01                    adda #1
+C99F: 9758                    sta  TMPL
+C9A1: 2402                    bcc  SLENOKADD
+C9A3: 0C57                    inc  TMPH
+C9A5:                 SLENOKADD:
+C9A5: 9657                    lda  TMPH
+C9A7: 9A58                    ora  TMPL
+C9A9: 10270080                lbeq  SAVEEND                  ; kalan yoksa EOF
+C9AD:                 
+C9AD:                         ; SAVECNT = min(16, remaining)
+C9AD: 9657                    lda  TMPH
+C9AF: 2606                    bne  SLENSET16
+C9B1: 9658                    lda  TMPL
+C9B3: 8110                    cmpa #16
+C9B5: 2302                    bls  SLENSETVAL
+C9B7:                 SLENSET16:
+C9B7: 8610                    lda  #16
+C9B9:                 SLENSETVAL:
+C9B9: 976D                    sta  SAVECNT
+C9BB:                 
+C9BB:                         ; ':' yaz ve checksum'i sifirla
+C9BB: 863A                    lda  #':'
+C9BD: BDC135                  jsr  OUTCH
+C9C0: 0F6C                    clr  SAVECHKS
+C9C2:                 
+C9C2:                         ; len yaz + checksum
+C9C2: 966D                    lda  SAVECNT
+C9C4: 3402                    pshs a
+C9C6: BDC0DF                  jsr  HEXOUT
+C9C9: 3502                    puls a
+C9CB: 9B6C                    adda SAVECHKS
+C9CD: 976C                    sta  SAVECHKS
+C9CF:                 
+C9CF:                         ; adres HI yaz + checksum
+C9CF: 9640                    lda  addrhi
+C9D1: 3402                    pshs a
+C9D3: BDC0DF                  jsr  HEXOUT
+C9D6: 3502                    puls a
+C9D8: 9B6C                    adda SAVECHKS
+C9DA: 976C                    sta  SAVECHKS
+C9DC:                 
+C9DC:                         ; adres LO yaz + checksum
+C9DC: 9641                    lda  addrlo
+C9DE: 3402                    pshs a
+C9E0: BDC0DF                  jsr  HEXOUT
+C9E3: 3502                    puls a
+C9E5: 9B6C                    adda SAVECHKS
+C9E7: 976C                    sta  SAVECHKS
+C9E9:                 
+C9E9:                         ; record type = 00 (toplama etkisi yok, sadece yaz)
+C9E9: 8600                    lda  #$00
+C9EB: BDC0DF                  jsr  HEXOUT
+C9EE:                 
+C9EE:                         ; veri baytlari
+C9EE: 9E40                    ldx  addrhi                  ; X = ADDR
+C9F0: D66D                    ldb  SAVECNT                 ; B = sayac
+C9F2:                 SAVEDATA:
+C9F2: A684                    lda  ,x                      ; A = veri
+C9F4: 3402                    pshs a
+C9F6: BDC0DF                  jsr  HEXOUT                  ; veriyi yaz
+C9F9: 3502                    puls a
+C9FB: 9B6C                    adda SAVECHKS                ; checksum guncelle
+C9FD: 976C                    sta  SAVECHKS
+C9FF: 3001                    leax 1,x                     ; X++
+CA01: 9641                    lda  addrlo                  ; ADDR++
+CA03: 8B01                    adda #1
+CA05: 9741                    sta  addrlo
+CA07: 2406                    bcc  SDNC
+CA09: 9640                    lda  addrhi
+CA0B: 8B01                    adda #1
+CA0D: 9740                    sta  addrhi
+CA0F:                 SDNC:
+CA0F: 5A                      decb
+CA10: 26E0                    bne  SAVEDATA
+CA12:                 
+CA12:                         ; checksum = two's complement of sum
+CA12: 966C                    lda  SAVECHKS
+CA14: 40                      nega
+CA15: BDC0DF                  jsr  HEXOUT
+CA18:                 
+CA18: BDC52E                  jsr  CRLF                    ; satir sonu
+CA1B:                 
+CA1B:                         ; devam kosulu: ADDR <= END
+CA1B: 9640                    lda  addrhi
+CA1D: 9152                    cmpa LOADSTA
+CA1F: 1025FF6C                lblo  SAVENEXTLINE
+CA23: 2208                    bhi  SAVEEND
+CA25: 9641                    lda  addrlo
+CA27: 9153                    cmpa LOADSTAL
+CA29: 1023FF62                lbls  SAVENEXTLINE
+CA2D:                 
+CA2D:                 SAVEEND:
+CA2D:                         ; EOF rekordu: :00000001FF
+CA2D: 863A                    lda  #':'
+CA2F: BDC135                  jsr  OUTCH
+CA32: 8600                    lda  #$00
+CA34: BDC0DF                  jsr  HEXOUT                  ; len
+CA37: 8600                    lda  #$00
+CA39: BDC0DF                  jsr  HEXOUT                  ; addr HI
+CA3C: 8600                    lda  #$00
+CA3E: BDC0DF                  jsr  HEXOUT                  ; addr LO
+CA41: 8601                    lda  #$01
+CA43: BDC0DF                  jsr  HEXOUT                  ; type
+CA46: 86FF                    lda  #$FF
+CA48: BDC0DF                  jsr  HEXOUT                  ; checksum
+CA4B: BDC52E                  jsr  CRLF
+CA4E: 39                      rts    
+CA4F:                 ;--------------------SAVE ENDS HERE---------------------------
+CA4F:                 
+CA4F:                 
+CA4F:                 ; CMDEXECCOPY: ARGW0=src, ARGW1=dst, ARGW2=len  (len bayti kopyalar)
+CA4F:                 ; Overlap guvenli: eger dst araligina giriyorsa geri kopya yapar
+CA4F:                 CMDEXECCOPY:    ; COPY exec
+CA4F: BDC52E                  jsr  CRLF
+CA52:                 
+CA52:                         ; src -> X
+CA52: 9E65                    ldx  ARGW0HI
+CA54:                         ; dst -> U
+CA54: DE67                    ldu  ARGW1HI
+CA56:                         ; len -> TMPH:TMPL
+CA56: 966E                    lda  ARGW2HI
+CA58: 9757                    sta  TMPH
+CA5A: 966F                    lda  ARGW2LO
+CA5C: 9758                    sta  TMPL
+CA5E:                 
+CA5E:                         ; len=0 ise cik
+CA5E: 9657                    lda  TMPH
+CA60: 9A58                    ora  TMPL
+CA62: 1027008A                lbeq  CPEXIT
+CA66:                 
+CA66:                         ; src+len -> addrhi:addrlo  (ust sinir, dahil degil)
+CA66: 9666                    lda  ARGW0LO
+CA68: 9B58                    adda TMPL
+CA6A: 9741                    sta  addrlo
+CA6C: 9665                    lda  ARGW0HI
+CA6E: 9957                    adca TMPH
+CA70: 9740                    sta  addrhi
+CA72:                 
+CA72:                         ; --- yon secimi ---
+CA72:                         ; dst < src  -> ileri kopya
+CA72: 9667                    lda  ARGW1HI
+CA74: 9165                    cmpa ARGW0HI
+CA76: 2518                    blo  CPFWD
+CA78: 2206                    bhi  CPCHKOVER2         ; dst high > src high ise ileride kontrol et
+CA7A:                         ; high esit -> low karsilastir
+CA7A: 9668                    lda  ARGW1LO
+CA7C: 9166                    cmpa ARGW0LO
+CA7E: 2510                    blo  CPFWD              ; dst low < src low -> ileri
+CA80:                 
+CA80:                 CPCHKOVER2:
+CA80:                         ; simdi dst >= src
+CA80:                         ; eger dst < src+len ise OVERLAP -> geri kopya, aksi halde ileri
+CA80: 9667                    lda  ARGW1HI
+CA82: 9140                    cmpa addrhi
+CA84: 2524                    blo  CPBWD              ; dst high < (src+len) high -> geri
+CA86: 2208                    bhi  CPFWD              ; dst high > (src+len) high -> ileri
+CA88: 9668                    lda  ARGW1LO
+CA8A: 9141                    cmpa addrlo
+CA8C: 251C                    blo  CPBWD              ; dst low < (src+len) low -> geri
+CA8E:                         ; dst >= src+len -> ileri
+CA8E: 2000                    bra  CPFWD
+CA90:                 
+CA90:                 ; ---------- ileri kopya (low..high) ----------
+CA90:                 CPFWD:
+CA90:                 CPFWDLOOP:
+CA90: 9657                    lda  TMPH
+CA92: 9A58                    ora  TMPL
+CA94: 275A                    beq  CPEXIT
+CA96: A684                    lda  ,x
+CA98: A7C4                    sta  ,u
+CA9A: 3001                    leax 1,x
+CA9C: 3341                    leau 1,u
+CA9E:                         ; len--
+CA9E: 9658                    lda  TMPL
+CAA0: 8001                    suba #1
+CAA2: 9758                    sta  TMPL
+CAA4: 24EA                    bcc  CPFWDLOOP
+CAA6: 0A57                    dec  TMPH
+CAA8: 20E6                    bra  CPFWDLOOP
+CAAA:                 
+CAAA:                 ; ---------- geri kopya (high..low) ----------
+CAAA:                 CPBWD:
+CAAA:                         ; X = src + len - 1  (addrhi:addrlo su an src+len)
+CAAA: 9641                    lda  addrlo
+CAAC: 8001                    suba #1
+CAAE: 9741                    sta  addrlo
+CAB0: 2406                    bcc  CPBWDX
+CAB2: 9640                    lda  addrhi
+CAB4: 8001                    suba #1
+CAB6: 9740                    sta  addrhi
+CAB8: 9E40            CPBWDX: ldx  addrhi
+CABA:                 
+CABA:                         ; U = dst + len - 1  (PTR:PTRL hesap icin kullaniliyor)
+CABA: 9668                    lda  ARGW1LO
+CABC: 9B58                    adda TMPL
+CABE: 9747                    sta  PTRL
+CAC0: 9667                    lda  ARGW1HI
+CAC2: 9957                    adca TMPH
+CAC4: 9746                    sta  PTR
+CAC6: 9647                    lda  PTRL
+CAC8: 8001                    suba #1
+CACA: 9747                    sta  PTRL
+CACC: 2406                    bcc  CPBWDU
+CACE: 9646                    lda  PTR
+CAD0: 8001                    suba #1
+CAD2: 9746                    sta  PTR
+CAD4: DE46            CPBWDU: ldu  PTR
+CAD6:                 
+CAD6:                 CPBWDLOOP:
+CAD6: 9657                    lda  TMPH
+CAD8: 9A58                    ora  TMPL
+CADA: 2714                    beq  CPEXIT
+CADC: A684                    lda  ,x
+CADE: A7C4                    sta  ,u
+CAE0: 301F                    leax -1,x
+CAE2: 335F                    leau -1,u
+CAE4:                         ; len--
+CAE4: 9658                    lda  TMPL
+CAE6: 8001                    suba #1
+CAE8: 9758                    sta  TMPL
+CAEA: 24EA                    bcc  CPBWDLOOP
+CAEC: 0A57                    dec  TMPH
+CAEE: 20E6                    bra  CPBWDLOOP
+CAF0:                 
+CAF0:                 CPEXIT:
+CAF0: 39                      rts
+CAF1:                 
+CAF1:                 ;---------------------------COPY COMMAND ENDS HERE----------------
+CAF1:                 
+CAF1:                 
+CAF1:                 ;-----------------------------FILL COMMAND------------------------
+CAF1:                 
+CAF1:                 ; CMDEXECFILL: [ARGW0 .. ARGW1] dahil araligini ARGW2LO degeriyle doldurur
+CAF1:                 CMDEXECFILL:     ; FILL exec
+CAF1: BDC52E                  jsr  CRLF
+CAF4:                 
+CAF4:                         ; start -> addrhi:addrlo
+CAF4: 9665                    lda  ARGW0HI
+CAF6: 9740                    sta  addrhi
+CAF8: 9666                    lda  ARGW0LO
+CAFA: 9741                    sta  addrlo
+CAFC:                 
+CAFC:                         ; end -> LOADSTA:LOADSTAL
+CAFC: 9667                    lda  ARGW1HI
+CAFE: 9752                    sta  LOADSTA
+CB00: 9668                    lda  ARGW1LO
+CB02: 9753                    sta  LOADSTAL
+CB04:                 
+CB04:                         ; byte deger -> B
+CB04: 966F                    lda  ARGW2LO
+CB06: 1F89                    tfr  a,b
+CB08:                 
+CB08:                         ; X = addr
+CB08: 9E40                    ldx  addrhi
+CB0A:                 
+CB0A:                 FILLLOOP:
+CB0A:                         ; addr > end ? bitir
+CB0A: 9640                    lda  addrhi
+CB0C: 9152                    cmpa LOADSTA
+CB0E: 2508                    blo  FILLSTORE
+CB10: 221A                    bhi  FILLDONE
+CB12: 9641                    lda  addrlo
+CB14: 9153                    cmpa LOADSTAL
+CB16: 2214                    bhi  FILLDONE
+CB18:                 
+CB18:                 FILLSTORE:
+CB18: E784                    stb  ,x                 ; degeri yaz
+CB1A: 3001                    leax 1,x                ; X++
+CB1C:                         ; addr++
+CB1C: 9641                    lda  addrlo
+CB1E: 8B01                    adda #1
+CB20: 9741                    sta  addrlo
+CB22: 24E6                    bcc  FILLLOOP
+CB24: 9640                    lda  addrhi
+CB26: 8B01                    adda #1
+CB28: 9740                    sta  addrhi
+CB2A: 20DE                    bra  FILLLOOP
+CB2C:                 
+CB2C:                 FILLDONE:
+CB2C: 39                      rts
+CB2D:                 
+CB2D:                 ;---------------------FILL ENDS HERE-----------------------        
+CB2D:                 
+CB2D:                 ; ===================== MONITOR MAIN — uses Kernel then Exec =====================
+CB2D:                 MON:
+CB2D: 860D                    lda  #$0D
+CB2F: BDC135                  jsr  OUTCH
+CB32: 860A                    lda  #$0A
+CB34: BDC135                  jsr  OUTCH
+CB37: 8EC4FB                  ldx  #PMON
+CB3A: BDC109                  jsr  PRINT
+CB3D:                 
+CB3D: BDC53F                  jsr  READLINE        ; fill INBUF
+CB40: BDC593                  jsr  SINIT           ; INPOS=0
+CB43:                 
+CB43: BDC603                  jsr  READCMD         ; detect R/D/M/L/H
+CB46: 9664                    lda  CMDID
+CB48: 2752                    beq  MONERR          ; unknown → '?'
+CB4A:                 
+CB4A: BDC6ED                  jsr  PARSEARGS       ; fill ARGW0/ARGW1
+CB4D: 254D                    bcs  MONERR
+CB4F:                 
+CB4F:                         ; dispatch (exec only — no parsing here)
+CB4F: 9664                    lda  CMDID
+CB51: 8101                    cmpa #1
+CB53: 271E                    beq  DORUN
+CB55: 8102                    cmpa #2
+CB57: 271F                    beq  DODUMP
+CB59: 8103                    cmpa #3
+CB5B: 2720                    beq  DOMEM
+CB5D: 8104                    cmpa #4
+CB5F: 2722                    beq  DOLOAD
+CB61: 8105                    cmpa #5
+CB63: 2723                    beq  DOHELP
+CB65: 8106                    cmpa #6         ;SAVE
+CB67: 2724                    beq  DOSAVE
+CB69: 8107                    cmpa #7
+CB6B: 2725                    beq  DOCOPY
+CB6D: 8108                    cmpa #8
+CB6F: 2726                    beq  DOFILL
+CB71: 20BA                    bra  MON
+CB73:                                 
+CB73:                         
+CB73:                 
+CB73: BDC82E          DORUN:  jsr  CMDEXECRUN
+CB76: 20B5                    bra  MON
+CB78: BDC835          DODUMP: jsr  CMDEXECDUMP
+CB7B: 20B0                    bra  MON
+CB7D: BDC8B0          DOMEM:  jsr  CMDEXECMEM
+CB80: 16FFAA                  lbra MON
+CB83: BDC900          DOLOAD: jsr  CMDEXECLOAD
+CB86: 20A5                    bra  MON
+CB88: BDC906          DOHELP: jsr  CMDEXECHELP
+CB8B: 20A0                    bra  MON
+CB8D: BDC97C          DOSAVE: jsr  CMDEXECSAVE
+CB90: 209B                    bra  MON 
+CB92: BDCA4F          DOCOPY: jsr  CMDEXECCOPY
+CB95: 2096                    bra  MON
+CB97: BDCAF1          DOFILL: jsr  CMDEXECFILL
+CB9A: 2091                    bra  MON                
+CB9C:                 
+CB9C:                 
+CB9C:                 MONERR:
+CB9C: 8EC4FF                  ldx  #PHELP
+CB9F: BDC109                  jsr  PRINT
+CBA2: 2089                    bra  MON
+CBA4:                 
+CBA4:                 ;============MON ENDS HERE=======================
+CBA4:                 
+CBA4:                 ;-----USEFUL MACHINE CODE WRITING ROUTINES-------
+CBA4:                 ; DELAY1S7350: ~1 saniye gecikme @ 7.350 MHz, tum register'lari korur
+CBA4:                 DELAY1S:         
+CBA4: 3416                    pshs  a,b,x
+CBA6:                 
+CBA6: 8E05DC                  ldx   #1500              ; dis sayaç (DECIMAL)
+CBA9:                 DLOOP:
+CBA9: C600                    ldb   #0                  ; ic sayaç = 256 adim
+CBAB:                 DINNER:
+CBAB: 5A                      decb                       ; 2 cy
+CBAC: 26FD                    bne   DINNER               ; 3 cy (alinarak), son tur 2 cy
+CBAE: 301F                    leax  -1,x                 ; 3 cy
+CBB0: 26F7                    bne   DLOOP                ; 3 cy (alinarak), son tur 2 cy
+CBB2:                 
+CBB2: 3516                    puls  x,b,a
+CBB4: 39                      rts
+CBB5:                 ;-------------DELAY1S FINISHED HERE-----------
+CBB5:                 PRINTA: ;Prints Aregister content as HEX
+CBB5: BDC0DF                  jsr HEXOUT
+CBB8: 39                      RTS
+CBB9:                 
+CBB9:                 PRINTX: ;Prints X register content as 4 digit Hex
+CBB9:                 ; X register degerini 4 hane "HHLL" olarak ekrana yazar.
+CBB9:                 ;           Tum register'lari korur, cikista X dahil hicbiri degismez.
+CBB9:                 
+CBB9: 3416                    pshs  a,x,b    ; tumunu koru
+CBBB: 1F10                    tfr   x,d                ; D = X  (A=HI, B=LO)
+CBBD:                 ;D registerinin üst yarısı: A, alt yarısı B den oluşur
+CBBD:                         ; yuksek bayti yaz
+CBBD: BDC0DF                  jsr   HEXOUT             ; A’daki bayti "XX" basar
+CBC0:                 
+CBC0:                         ; dusuk bayti yaz
+CBC0: 1F98                    tfr   b,a
+CBC2: BDC0DF                  jsr   HEXOUT
+CBC5:                 
+CBC5: 3516                    puls  b,x,a
+CBC7: 39                      rts        
+CBC8:                 
+CBC8:                 ;-----USEFUL MACHINE CODE  ROUTINES ENDED-------
+CBC8:                            org  $fff0      ; vector table
+FFF0:                 
+FFF0: 0000                        fdb  $0000      ; Reserved
+FFF2: 0000                        fdb  $0000      ; SWI3
+FFF4: 0000                        fdb  $0000      ; SWI2
+FFF6: 0000                        fdb  $0000      ; FIRQ
+FFF8: 0000                        fdb  $0000      ; IRQ
+FFFA: 0000                        fdb  $0000      ; SWI
+FFFC: 0000                        fdb  $0000      ; NMI
+FFFE: C000                        fdb  reset      ; RESET
+
+SYMBOL TABLE
+   ACIACTL 00 a000   ACIADAT 00 a001   ACIASTA 00 a000    ADDRHI 00 0040
+    ADDRLO 00 0041    ADLEN0 00 006a    ADLEN1 00 006b    ARGCNT 00 0069
+   ARGW0HI 00 0065   ARGW0LO 00 0066   ARGW1HI 00 0067   ARGW1LO 00 0068
+   ARGW2HI 00 006e   ARGW2LO 00 006f    BYTERD 02 c089      BYTH 02 c08b
+      BYTL 02 c09dCMDEXECCOPY 02 ca4fCMDEXECDUMP 02 c835CMDEXECFILL 02 caf1
+CMDEXECHELP 02 c906CMDEXECLOAD 02 c900CMDEXECMEM 02 c8b0CMDEXECRUN 02 c82e
+CMDEXECSAVE 02 c97c     CMDID 00 0064     CPBWD 02 caaa CPBWDLOOP 02 cad6
+    CPBWDU 02 cad4    CPBWDX 02 cab8CPCHKOVER2 02 ca80    CPEXIT 02 caf0
+     CPFWD 02 ca90 CPFWDLOOP 02 ca90      CRLF 02 c52e    DATAIN 02 c06e
+    DCOUNT 02 c898   DELAY1S 02 cba4  DELAYMSG 02 c4c4DFINISHLINE 02 c89c
+    DINNER 02 cbab DLINELOOP 02 c870     DLOOP 02 cba9 DNEXTLINE 02 c858
+    DOCOPY 02 cb92    DODUMP 02 cb78    DOFILL 02 cb97    DOHELP 02 cb88
+    DOLOAD 02 cb83     DOMEM 02 cb7d   DONEMSG 02 c29b     DORUN 02 cb73
+    DOSAVE 02 cb8d    DPRINT 02 c87e      DRET 02 c8af    DSTART 02 c855
+  FILLDONE 02 cb2c  FILLLOOP 02 cb0a FILLSTORE 02 cb18     GETCH 02 c120
+  GETCHMSG 02 c484GETGARBAGE 02 c07d      GMSG 02 c144      GOON 02 c067
+     GREET 02 c00f      GSUP 02 c134  HEXALPHA 02 c0bd     HEXAS 02 c0fa
+    HEXBAD 02 c0db    HEXCON 02 c0b0  HEXLDREG 00 0045    HEXLOW 02 c0cc
+    HEXOUT 02 c0df HEXOUTMSG 02 c4eb    HLPMSG 02 c2be     INBUF 00 0080
+  INITACIA 02 c115     INLEN 00 0060     INPOS 00 0061    INTLIN 02 c043
+   INTLIN1 02 c040    KWCOPY 02 c524    KWDUMP 02 c501    KWFILL 02 c529
+    KWHELP 02 c516    KWLOAD 02 c511     KWMEM 02 c50d  KWMEMORY 02 c506
+     KWRUN 02 c51b    KWSAVE 02 c51f  LDUSTART 00 1bff      LMSG 02 c26a
+    LOADED 02 c021   LOADERZ 02 c018   LOADSTA 00 0052  LOADSTAL 00 0053
+ MATCHWORD 02 c5c7    MDONEX 02 c8fc     MECHO 02 c8f5    MLOOPX 02 c8ca
+       MON 02 cb2d    MONERR 02 cb9c  MWENDPAT 02 c5de    MWFAIL 02 c5fe
+    MWLOOP 02 c5d0      MWOK 02 c5ea     OUTCH 02 c135  OUTCHMSG 02 c494
+     PAERR 02 c7e6 PANOTCOPY 02 c77d    PANOTD 02 c73f PANOTFILL 02 c7b2
+    PANOTR 02 c716 PANOTSAVE 02 c756      PAOK 02 c7e5 PARSEARGS 02 c6ed
+      PEND 02 c114     PHELP 02 c4ff      PMON 02 c4fb       PO1 02 c137
+     PRINT 02 c109    PRINTA 02 cbb5 PRINTAMSG 02 c4b4    PRINTX 02 cbb9
+ PRINTXMSG 02 c4a4 PROMPTMSG 02 c4db       PTR 00 0046      PTRL 00 0047
+     PUTSP 02 c539   RADELIM 02 c6aaRADONENONE 02 c6ea     RAEOF 02 c6e3
+ RAHAVENIB 02 c6bb  RAHEXALP 02 c6b7  RAHEXNUM 02 c6b3    RALOOP 02 c693
+  RAMSTART 00 1fff    RANEXT 02 c6da  RASHIFT4 02 c6c9     RCERR 02 c68a
+ RCTRYCOPY 02 c66e RCTRYFILL 02 c67c RCTRYHELP 02 c644 RCTRYLOAD 02 c636
+  RCTRYMEM 02 c628RCTRYMEMORY 02 c61a  RCTRYRUN 02 c652 RCTRYSAVE 02 c660
+  READADDR 02 c68d   READCMD 02 c603  READLINE 02 c53f    RECLEN 00 0042
+     RESET 02 c000    RLBELL 02 c57f      RLBS 02 c568    RLDONE 02 c586
+    RLLOOP 02 c541      SADV 02 c5a6   SADVRET 02 c5ae  SAVECHKS 00 006c
+   SAVECNT 00 006d  SAVEDATA 02 c9f2   SAVEEND 02 ca2dSAVENEXTLINE 02 c98f
+      SDNC 02 ca0f      SEAT 02 c5c1     SINIT 02 c593    SKIPSP 02 c5af
+ SLENOKADD 02 c9a5 SLENSET16 02 c9b7SLENSETVAL 02 c9b9  SPACEMSG 02 c4d4
+     SPEEK 02 c596  SPEEKEND 02 c5a4    SRBERR 02 c82b SRBERRPOP 02 c829
+ SREADBYTE 02 c7e9     SSKIP 02 c5af  SSKIPEND 02 c5c6    TABLEX 02 c2ae
+       TMP 00 0044      TMPH 00 0057      TMPL 00 0058       TOK 00 0062
